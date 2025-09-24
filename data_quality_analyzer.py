@@ -4,20 +4,23 @@ from dotenv import load_dotenv
 import os
 from datetime import datetime
 import warnings
+
 warnings.filterwarnings('ignore')
 
-# Carregar .env
+# Carrega variáveis de ambiente a partir do arquivo .env
 load_dotenv()
 
 def get_connection_sqlserver():
-    """Tenta diferentes métodos de conexão SQL Server"""
-    
+    """
+    Tenta estabelecer uma conexão com o SQL Server utilizando múltiplos drivers.
+    Retorna a conexão e o método utilizado. Se nenhum método funcionar, retorna (None, None).
+    """
     server = os.getenv('SQLSERVER_HOST')
     database = os.getenv('SQLSERVER_DATABASE')
     username = os.getenv('SQLSERVER_USER')
     password = os.getenv('SQLSERVER_PASSWORD')
-    
-    # Método 1: pymssql (mais compatível com Linux)
+
+    # Tenta conexão via pymssql (ideal para ambientes Linux)
     try:
         import pymssql
         print("Tentando pymssql...")
@@ -32,8 +35,8 @@ def get_connection_sqlserver():
         return conn, 'pymssql'
     except Exception as e:
         print(f"pymssql falhou: {str(e)[:50]}")
-    
-    # Método 2: pyodbc com diferentes drivers
+
+    # Tenta conexão via pyodbc com diferentes drivers
     try:
         import pyodbc
         drivers = [
@@ -42,7 +45,6 @@ def get_connection_sqlserver():
             'FreeTDS',
             'SQL Server'
         ]
-        
         for driver in drivers:
             try:
                 print(f"Tentando pyodbc com {driver}...")
@@ -57,28 +59,31 @@ def get_connection_sqlserver():
                 conn = pyodbc.connect(conn_string, timeout=10)
                 print(f"SUCESSO: Conectado via pyodbc + {driver}")
                 return conn, 'pyodbc'
-            except Exception as e:
+            except Exception:
+                # Se a tentativa falhar, continua para o próximo driver
                 continue
-                
     except ImportError:
         print("pyodbc não instalado")
-    
+
+    # Nenhum método funcionou
     return None, None
 
 def query_sqlserver_safe(query, params=None):
     """
-    Executa query SQL Server com conexão robusta e suporte a parâmetros
-    
+    Executa uma consulta no SQL Server de forma segura, com suporte a parâmetros e
+    tentativa de múltiplos métodos de conexão.
+
     Args:
-        query: Query SQL (pode usar ? para parâmetros com pyodbc ou %s para pymssql)
-        params: Tupla com parâmetros para a query
+        query (str): Query SQL a ser executada. Use '?' para parâmetros com pyodbc ou %s para pymssql.
+        params (tuple, opcional): Parâmetros para a query. Default: None.
+
+    Returns:
+        pandas.DataFrame: DataFrame com os resultados da consulta ou vazio em caso de falha.
     """
-    conn, method = get_connection_sqlserver()
-    
+    conn, _ = get_connection_sqlserver()
     if not conn:
         print("ERRO: Não foi possível conectar ao SQL Server")
         return pd.DataFrame()
-    
     try:
         if params:
             df = pd.read_sql(query, conn, params=params)
@@ -93,81 +98,87 @@ def query_sqlserver_safe(query, params=None):
 
 def build_filtered_query(table_name, schema='dbo', filters=None, columns=None):
     """
-    Constrói query SQL com filtros parametrizados
-    
+    Constrói uma query SQL dinâmicamente, permitindo seleção de colunas e aplicação de filtros parametrizados.
+
     Args:
-        table_name: Nome da tabela
-        schema: Schema da tabela
-        filters: Dict com filtros {'coluna': {'operator': '>=', 'value': '2022-01-01'}}
-        columns: Lista de colunas específicas (None = todas)
-    
+        table_name (str): Nome da tabela a ser consultada.
+        schema (str): Schema da tabela. Default: 'dbo'.
+        filters (dict, opcional): Dicionário com filtros no formato {coluna: {operator: operador, value: valor}}.
+        columns (list, opcional): Lista de colunas a serem selecionadas. Default: None (todas as colunas).
+
     Returns:
-        tuple: (query_string, params_tuple)
+        tuple: Uma tupla contendo a query montada e a tupla de parâmetros.
     """
-    
-    # Construir SELECT
-    if columns:
-        select_clause = ', '.join(columns)
-    else:
-        select_clause = '*'
-    
-    # Query base
+    # Monta o SELECT
+    select_clause = ', '.join(columns) if columns else '*'
     query = f"SELECT {select_clause} FROM {schema}.{table_name}"
     params = []
-    
-    # Adicionar filtros WHERE
+    # Aplica filtros se fornecidos
     if filters:
         where_conditions = []
         for col_name, filter_config in filters.items():
             operator = filter_config.get('operator', '=')
             value = filter_config['value']
-            
-            # Validar operadores seguros
+            # Valida operadores seguros
             safe_operators = ['=', '!=', '>', '>=', '<', '<=', 'LIKE', 'IN', 'NOT IN']
             if operator.upper() not in safe_operators:
                 raise ValueError(f"Operador não permitido: {operator}")
-            
-            if operator.upper() == 'IN':
-                # Para operador IN, value deve ser uma lista
+            if operator.upper() in ['IN', 'NOT IN']:
+                # Para operadores IN e NOT IN, value deve ser uma lista
                 if not isinstance(value, (list, tuple)):
                     value = [value]
                 placeholders = ', '.join(['?' for _ in value])
-                where_conditions.append(f"{col_name} IN ({placeholders})")
-                params.extend(value)
-            elif operator.upper() == 'NOT IN':
-                # Para operador NOT IN, value deve ser uma lista
-                if not isinstance(value, (list, tuple)):
-                    value = [value]
-                placeholders = ', '.join(['?' for _ in value])
-                where_conditions.append(f"{col_name} NOT IN ({placeholders})")
+                clause = f"{col_name} {operator} ({placeholders})"
+                where_conditions.append(clause)
                 params.extend(value)
             else:
                 where_conditions.append(f"{col_name} {operator} ?")
                 params.append(value)
-        
         if where_conditions:
             query += " WHERE " + " AND ".join(where_conditions)
-    
     return query, tuple(params)
 
 def generate_markdown_report(all_column_analysis, table_name, schema, filters, 
                            columns_to_exclude, exclusion_reasons, query, params):
-    """Gera relatório em markdown"""
-    
+    """
+    Gera um relatório em Markdown descrevendo os resultados da análise de qualidade de dados.
+    Inclui estilo CSS inline para tema escuro e destaca visivelmente as ações de manter ou excluir colunas.
+
+    Args:
+        all_column_analysis (list): Lista de dicionários com os dados de análise de cada coluna.
+        table_name (str): Nome da tabela analisada.
+        schema (str): Schema da tabela.
+        filters (dict): Filtros aplicados para a extração de dados.
+        columns_to_exclude (list): Lista de colunas marcadas para exclusão.
+        exclusion_reasons (dict): Dicionário com os motivos para exclusão de cada coluna.
+        query (str): Query SQL executada.
+        params (tuple): Parâmetros utilizados na query.
+
+    Returns:
+        str: Conteúdo em Markdown formatado com estilo dark theme.
+    """
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    
-    # Iniciar markdown
-    markdown = f"""# Relatório de Análise de Qualidade de Dados
-
-## Informações Gerais
-- **Tabela:** {schema}.{table_name}
-- **Data/Hora:** {timestamp}
-- **Total de Registros:** {len(all_column_analysis[0]['Dataframe']) if all_column_analysis else 'N/A'}
-- **Total de Colunas:** {len(all_column_analysis)}
-
-## Filtros Aplicados
-"""
-    
+    # CSS inline para tema escuro e formatação das tabelas
+    markdown = """<style>
+    body { background-color: #1e1e1e; color: #e5e5e5; font-family: Arial, sans-serif; }
+    h1, h2, h3 { color: #ffcc00; }
+    table { border-collapse: collapse; width: 100%; margin-top: 10px; }
+    th, td { border: 1px solid #555; padding: 6px; text-align: center; }
+    th { background-color: #333; color: #ffcc00; }
+    td { color: #ddd; }
+    .manter { color: #00cc66; font-weight: bold; }
+    .excluir { color: #ff4444; font-weight: bold; }
+    code { background-color: #2d2d2d; padding: 2px 4px; border-radius: 4px; }
+    </style>\n\n"""
+    # Informações gerais
+    markdown += (f"# Relatório de Análise de Qualidade de Dados\n\n"
+                 f"## Informações Gerais\n"
+                 f"- **Tabela:** `{schema}.{table_name}`\n"
+                 f"- **Data/Hora:** {timestamp}\n"
+                 f"- **Total de Registros:** {len(all_column_analysis[0]['Dataframe']) if all_column_analysis else 'N/A'}\n"
+                 f"- **Total de Colunas:** {len(all_column_analysis)}\n\n")
+    # Filtros aplicados
+    markdown += "---\n\n## Filtros Aplicados\n"
     if filters:
         for col, filter_config in filters.items():
             op = filter_config['operator']
@@ -175,232 +186,144 @@ def generate_markdown_report(all_column_analysis, table_name, schema, filters,
             markdown += f"- **{col}** {op} `{val}`\n"
     else:
         markdown += "- Nenhum filtro aplicado\n"
-    
-    markdown += f"""
-## Query Executada
-```sql
-{query}
-```
-
-"""
-    
+    # Query executada
+    markdown += ("\n---\n\n## Query Executada\n"
+                 "```sql\n"
+                 f"{query}\n"
+                 "```\n")
     if params:
         markdown += f"**Parâmetros:** {params}\n\n"
-    
-    # Resumo
+    # Resumo da análise
     total_cols = len(all_column_analysis)
     exclude_count = len(columns_to_exclude)
     keep_count = total_cols - exclude_count
-    
-    markdown += f"""## Resumo da Análise
-
-| Métrica | Valor |
-|---------|-------|
-| **Total de Colunas** | {total_cols} |
-| **Colunas para Manter** | {keep_count} |
-| **Colunas para Excluir** | {exclude_count} |
-| **Percentual de Exclusão** | {(exclude_count/total_cols)*100:.1f}% |
-
-"""
-    
-    # Colunas para exclusão
+    markdown += ("\n---\n\n## Resumo da Análise\n\n"
+                 "| Métrica | Valor |\n"
+                 "|---------|-------|\n"
+                 f"| Total de Colunas | {total_cols} |\n"
+                 f"| Colunas para Manter | {keep_count} |\n"
+                 f"| Colunas para Excluir | {exclude_count} |\n"
+                 f"| Percentual de Exclusão | {(exclude_count/total_cols)*100:.1f}% |\n\n")
+    # Colunas sugeridas para exclusão
     if columns_to_exclude:
-        markdown += """## Colunas Sugeridas para Exclusão
-
-| # | Coluna | Motivos |
-|---|--------|---------|
-"""
+        markdown += ("---\n\n## Colunas Sugeridas para Exclusão\n\n"
+                     "| # | Coluna | Motivos |\n"
+                     "|---|--------|---------|\n")
         for i, col in enumerate(columns_to_exclude, 1):
             reasons_text = " | ".join(exclusion_reasons[col])
             markdown += f"| {i} | `{col}` | {reasons_text} |\n"
-        
-        markdown += f"""
-## Comandos SQL Sugeridos
-
-### Excluir Colunas da Tabela Existente
-```sql
--- Excluir {exclude_count} colunas da tabela {schema}.{table_name}
-ALTER TABLE {schema}.{table_name}
-DROP COLUMN {', '.join(columns_to_exclude)};
-```
-
-### Criar Nova Tabela Limpa
-```sql
--- Criar nova tabela apenas com colunas úteis
-"""
-        good_columns = [col['Coluna'] for col in all_column_analysis if col['Acao'] == 'MANTER']
-        columns_select = ', '.join(good_columns)
-        markdown += f"SELECT {columns_select}\n"
-        markdown += f"INTO {schema}.{table_name}_cleaned\n"
-        markdown += f"FROM {schema}.{table_name}"
-        
-        if filters:
-            # Recriar WHERE clause
-            where_parts = []
-            for col_name, filter_config in filters.items():
-                op = filter_config['operator']
-                val = filter_config['value']
-                if isinstance(val, str):
-                    val = f"'{val}'"
-                elif isinstance(val, (list, tuple)):
-                    val = "(" + ", ".join([f"'{v}'" if isinstance(v, str) else str(v) for v in val]) + ")"
-                where_parts.append(f"{col_name} {op} {val}")
-            markdown += f"\nWHERE {' AND '.join(where_parts)}"
-        markdown += ";\n```\n\n"
-    
     else:
-        markdown += """## Resultado da Análise
-
-✅ **NENHUMA COLUNA PRECISA SER EXCLUÍDA!**
-
-Todas as colunas atendem aos critérios de qualidade definidos.
-
-"""
-    
-    # Análise detalhada de todas as colunas
-    markdown += """## Análise Detalhada de Todas as Colunas
-
-| Coluna | Ação | Nulos (%) | Valores Únicos | Variância (%) | Zeros (%) | Vazias (%) | Tipo | Motivos |
-|--------|------|-----------|----------------|---------------|-----------|------------|------|---------|
-"""
-    
+        markdown += ("---\n\n## Resultado da Análise\n\n"
+                     "Nenhuma coluna precisa ser excluída.\n"
+                     "Todas as colunas atendem aos critérios de qualidade definidos.\n")
+    # Detalhamento de todas as colunas
+    markdown += ("\n---\n\n## Análise Detalhada de Todas as Colunas\n\n"
+                 "| Coluna | Ação | Nulos (%) | Valores Únicos | Variância (%) | Zeros (%) | Vazias (%) | Tipo | Motivos |\n"
+                 "|--------|------|-----------|----------------|---------------|-----------|------------|------|---------|\n")
     for col_data in all_column_analysis:
-        markdown += (f"| `{col_data['Coluna']}` | "
-                    f"{'🔴 EXCLUIR' if col_data['Acao'] == 'EXCLUIR' else '✅ MANTER'} | "
-                    f"{col_data['Nulos_Percent']}% | "
-                    f"{col_data['Valores_Unicos']} | "
-                    f"{col_data['Variancia_Percent']}% | "
-                    f"{col_data['Zeros_Percent']}% | "
-                    f"{col_data['Vazias_Percent']}% | "
-                    f"`{col_data['Tipo_Dados']}` | "
-                    f"{col_data['Motivos']} |\n")
-    
+        action_cell = ("<span class='excluir'>EXCLUIR</span>" if col_data['Acao'] == 'EXCLUIR'
+                       else "<span class='manter'>MANTER</span>")
+        markdown += (f"| `{col_data['Coluna']}` | {action_cell} | "
+                     f"{col_data['Nulos_Percent']}% | "
+                     f"{col_data['Valores_Unicos']} | "
+                     f"{col_data['Variancia_Percent']}% | "
+                     f"{col_data['Zeros_Percent']}% | "
+                     f"{col_data['Vazias_Percent']}% | "
+                     f"`{col_data['Tipo_Dados']}` | "
+                     f"{col_data['Motivos']} |\n")
     # Critérios utilizados
-    markdown += f"""
-## Critérios de Exclusão Utilizados
-
-### Critérios Aplicados:
-- **Muitos Nulos:** > 90% de valores nulos
-- **Valor Único:** Coluna possui apenas 1 valor único (sem variação)
-- **Muitos Zeros:** > 80% de valores zero (para colunas numéricas)
-- **Strings Vazias:** > 80% de strings vazias (para colunas de texto)
-
-### Colunas Mantidas:
-Colunas que **NÃO** atendem aos critérios de exclusão acima são consideradas úteis e mantidas na tabela.
-
----
-*Relatório gerado automaticamente pelo Data Quality Analytics*
-"""
-    
+    markdown += ("\n---\n\n## Critérios de Exclusão Utilizados\n\n"
+                 "- Muitos Nulos: > 90% de valores nulos\n"
+                 "- Valor Único: coluna possui apenas 1 valor único\n"
+                 "- Muitos Zeros: > 80% de valores zero (para colunas numéricas)\n"
+                 "- Strings Vazias: > 80% de strings vazias (para colunas de texto)\n\n"
+                 "Colunas que não atendem a esses critérios são mantidas.\n")
     return markdown
 
 def identify_columns_to_exclude(table_name, schema='dbo', filters=None, 
                                null_threshold=90, zero_threshold=80):
     """
-    Identifica colunas candidatas à exclusão baseado em critérios específicos
-    
-    Parâmetros:
-    - table_name: Nome da tabela
-    - schema: Schema da tabela  
-    - filters: Dict com filtros {'coluna': {'operator': '>=', 'value': '2022-01-01'}}
-    - null_threshold: % de nulos acima do qual a coluna é candidata à exclusão
-    - zero_threshold: % de zeros/vazias acima do qual pode ser problemática
-    
-    CRITÉRIO MODIFICADO: Só exclui colunas com EXATAMENTE 1 valor único
+    Realiza a análise de exclusão de colunas com base em critérios de qualidade.
+
+    Args:
+        table_name (str): Nome da tabela a ser analisada.
+        schema (str): Schema da tabela. Default: 'dbo'.
+        filters (dict, opcional): Filtros aplicados na consulta SQL. Default: None.
+        null_threshold (int): Percentual mínimo de nulos para considerar a coluna candidata à exclusão. Default: 90.
+        zero_threshold (int): Percentual mínimo de zeros/vazios para considerar a coluna candidata à exclusão. Default: 80.
+
+    Returns:
+        dict: Dicionário com informações sobre as colunas a manter e excluir, além do relatório gerado.
     """
-    
-    print(f"\nIDENTIFICANDO COLUNAS PARA EXCLUSÃO")
+    print("\nIDENTIFICANDO COLUNAS PARA EXCLUSÃO")
     print(f"Tabela: {schema}.{table_name}")
-    
-    # Mostrar filtros aplicados
+    # Exibe filtros
     if filters:
         print("Filtros aplicados:")
         for col, filter_config in filters.items():
-            op = filter_config['operator']
-            val = filter_config['value']
-            print(f"  - {col} {op} {val}")
+            print(f"  - {col} {filter_config['operator']} {filter_config['value']}")
     else:
         print("Sem filtros aplicados")
-    
     print(f"Critérios: Nulos >{null_threshold}%, Valor Único (=1), Zeros >{zero_threshold}%")
     print("=" * 70)
-    
-    # Construir e executar query
+    # Monta e executa a query
     try:
         query, params = build_filtered_query(
             table_name=table_name,
             schema=schema,
             filters=filters
         )
-        
         print(f"Query executada: {query}")
         if params:
             print(f"Parâmetros: {params}")
-        
         df = query_sqlserver_safe(query, params)
-        
     except Exception as e:
         print(f"Erro ao construir query: {e}")
         return None
-    
     if df.empty:
         print("Não foi possível carregar dados da tabela")
         return None
-    
     print(f"Analisando {len(df):,} registros, {len(df.columns)} colunas")
-    
-    # Lista para armazenar todas as análises
     columns_to_exclude = []
     exclusion_reasons = {}
     all_column_analysis = []
-    
-    print(f"\nANALISE DETALHADA DE TODAS AS COLUNAS:")
+    print("\nANALISE DETALHADA DE TODAS AS COLUNAS:")
     print("-" * 70)
-    
     for col in df.columns:
         col_data = df[col].dropna()
         total_data = df[col]
         reasons = []
-        
-        # Calcular métricas básicas
+        # Métricas básicas
         null_count = total_data.isnull().sum()
         null_percent = (null_count / len(total_data)) * 100
         unique_count = col_data.nunique() if len(col_data) > 0 else 0
         unique_percent = (unique_count / len(col_data)) * 100 if len(col_data) > 0 else 0
-        
-        # 1. ANÁLISE DE NULOS
+        # Critério 1: Muitos nulos
         if null_percent >= null_threshold:
             reasons.append(f"MUITOS NULOS ({null_percent:.1f}%)")
-        
-        # 2. ANÁLISE DE VARIÂNCIA (MODIFICADO: só exclui se tem EXATAMENTE 1 valor único)
-        if len(col_data) > 0:
-            # Coluna com valor único (ÚNICO CRITÉRIO DE VARIÂNCIA)
-            if unique_count == 1:
-                reasons.append(f"VALOR ÚNICO ({col_data.iloc[0]})")
-        
-        # 3. ANÁLISE DE ZEROS (para colunas numéricas)
+        # Critério 2: Variância (exatamente 1 valor único)
+        if len(col_data) > 0 and unique_count == 1:
+            reasons.append(f"VALOR ÚNICO ({col_data.iloc[0]})")
+        # Critério 3: Muitos zeros (somente para colunas numéricas)
         zero_percent = 0
         if len(col_data) > 0 and pd.api.types.is_numeric_dtype(col_data):
             zero_count = (col_data == 0).sum()
             zero_percent = (zero_count / len(col_data)) * 100
-            
             if zero_percent >= zero_threshold:
                 reasons.append(f"MUITOS ZEROS ({zero_percent:.1f}%)")
-        
-        # 4. ANÁLISE DE STRINGS VAZIAS
+        # Critério 4: Strings vazias (somente para colunas de texto)
         empty_percent = 0
         if len(col_data) > 0 and (pd.api.types.is_string_dtype(col_data) or pd.api.types.is_object_dtype(col_data)):
             try:
                 str_data = col_data.astype(str).str.strip()
                 empty_count = (str_data == '').sum()
                 empty_percent = (empty_count / len(str_data)) * 100
-                
                 if empty_percent >= zero_threshold:
                     reasons.append(f"STRINGS VAZIAS ({empty_percent:.1f}%)")
-            except:
+            except Exception:
+                # Ignora erros na conversão para string
                 pass
-        
-        # Determinar ação e salvar análise completa
+        # Decide ação e registra motivos
         if reasons:
             columns_to_exclude.append(col)
             exclusion_reasons[col] = reasons
@@ -413,8 +336,7 @@ def identify_columns_to_exclude(table_name, schema='dbo', filters=None,
                 reason_text += f", {zero_percent:.1f}% zeros"
             if empty_percent > 0:
                 reason_text += f", {empty_percent:.1f}% vazias"
-        
-        # Armazenar análise completa
+        # Guarda análise completa
         all_column_analysis.append({
             'Coluna': col,
             'Acao': action,
@@ -426,40 +348,33 @@ def identify_columns_to_exclude(table_name, schema='dbo', filters=None,
             'Vazias_Percent': round(empty_percent, 1),
             'Motivos': " | ".join(reasons) if reasons else "OK",
             'Tipo_Dados': str(df[col].dtype),
-            'Dataframe': df  # Para usar no relatório
+            'Dataframe': df
         })
-        
         print(f"{col:<25} {action:<8} - {reason_text}")
-    
-    # RESUMO FINAL
-    print(f"\nRESUMO DA ANÁLISE:")
+    # Exibe resumo final
+    print("\nRESUMO DA ANÁLISE:")
     print("-" * 50)
     print(f"Total de colunas analisadas: {len(df.columns)}")
     print(f"Colunas para MANTER: {len(df.columns) - len(columns_to_exclude)}")
     print(f"Colunas para EXCLUIR: {len(columns_to_exclude)}")
-    
     if columns_to_exclude:
-        print(f"\nLISTA COMPLETA DE EXCLUSÃO:")
+        print("\nLISTA COMPLETA DE EXCLUSÃO:")
         print("-" * 40)
         for i, col in enumerate(columns_to_exclude, 1):
             reasons_text = " | ".join(exclusion_reasons[col])
             print(f"{i:2d}. {col} → {reasons_text}")
-        
-        # GERAR COMANDO SQL
-        print(f"\nCOMANDO SQL PARA EXCLUSÃO:")
+        print("\nCOMANDO SQL PARA EXCLUSÃO:")
         print("-" * 40)
         print(f"-- Excluir {len(columns_to_exclude)} colunas da tabela {schema}.{table_name}")
         print(f"ALTER TABLE {schema}.{table_name}")
         print(f"DROP COLUMN {', '.join(columns_to_exclude)};")
-        
-        print(f"\n-- Ou criar nova tabela apenas com colunas úteis:")
+        print("\n-- Ou criar nova tabela apenas com colunas úteis:")
         good_columns = [col for col in df.columns if col not in columns_to_exclude]
         columns_select = ', '.join(good_columns)
         print(f"SELECT {columns_select}")
         print(f"INTO {schema}.{table_name}_cleaned")
         print(f"FROM {schema}.{table_name}")
         if filters:
-            # Recriar WHERE clause para o comando final
             where_parts = []
             for col_name, filter_config in filters.items():
                 op = filter_config['operator']
@@ -471,31 +386,23 @@ def identify_columns_to_exclude(table_name, schema='dbo', filters=None,
                 where_parts.append(f"{col_name} {op} {val}")
             print(f"WHERE {' AND '.join(where_parts)}")
         print(";")
-    
     else:
         print("\nNENHUMA COLUNA PRECISA SER EXCLUÍDA!")
         print("Todas as colunas atendem aos critérios de qualidade.")
-    
-    # Gerar relatório em Markdown
+    # Gera arquivo Markdown
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    filename = f"data_quality_{table_name}_{timestamp}"
-    
+    filename = f"/home/suporte_amcom/Documentos/raphael-norris-ds/Projeto_IA_AMCOM/project_data_science/docs/data_quality/data_quality_{table_name}"
     try:
         markdown_content = generate_markdown_report(
             all_column_analysis, table_name, schema, filters,
             columns_to_exclude, exclusion_reasons, query, params
         )
-        
-        # Salvar arquivo markdown
+        # Salva arquivo .md
         with open(f"{filename}.md", 'w', encoding='utf-8') as f:
             f.write(markdown_content)
-        
         print(f"\nRelatório Markdown salvo: {filename}.md")
-        
     except Exception as e:
         print(f"Erro ao salvar Markdown: {e}")
-    
-    # Retornar informações úteis
     return {
         'total_columns': len(df.columns),
         'columns_to_exclude': columns_to_exclude,
@@ -511,61 +418,53 @@ def identify_columns_to_exclude(table_name, schema='dbo', filters=None,
 
 def analyze_for_exclusion(table_name, schema='dbo', strict=False, filters=None):
     """
-    Função simplificada para análise de exclusão com filtros flexíveis
-    
+    Interface de alto nível para a identificação de colunas a serem excluídas.
+
     Args:
-        table_name: Nome da tabela
-        schema: Schema da tabela
-        strict: True para critérios rigorosos, False para flexíveis
-        filters: Dict com filtros {'coluna': {'operator': '>=', 'value': '2022-01-01'}}
+        table_name (str): Nome da tabela a ser analisada.
+        schema (str): Schema da tabela. Default: 'dbo'.
+        strict (bool): Se True, usa critérios mais rigorosos; caso contrário, usa critérios flexíveis. Default: False.
+        filters (dict, opcional): Filtros a serem aplicados na consulta.
+
+    Returns:
+        dict: Resultado da função identify_columns_to_exclude com os critérios escolhidos.
     """
-    
     if strict:
-        # Critérios rigorosos
         return identify_columns_to_exclude(
             table_name, schema,
             filters=filters,
-            null_threshold=70,      # 70% de nulos
-            zero_threshold=90       # 90% de zeros
+            null_threshold=70,
+            zero_threshold=90
         )
     else:
-        # Critérios flexíveis
         return identify_columns_to_exclude(
             table_name, schema,
             filters=filters,
-            null_threshold=90,      # 90% de nulos
-            zero_threshold=80       # 80% de zeros
+            null_threshold=90,
+            zero_threshold=80
         )
 
 if __name__ == "__main__":
     print("ANALISADOR DE COLUNAS PARA EXCLUSÃO")
     print("=" * 50)
-    
-    # Testar conexão
     conn, method = get_connection_sqlserver()
     if conn:
         print(f"Conexão OK usando {method}")
         conn.close()
-        
-        # Exemplo de uso com filtros
         filters = {
             'DataCriacaoRegistro': {'operator': '>=', 'value': '2022-01-01'}
         }
-        
-        # Análise para exclusão
         result = analyze_for_exclusion(
-            table_name='Facas', 
-            schema='dbo', 
+            table_name='Facas',
+            schema='dbo',
             strict=False,
             filters=filters
         )
-        
         if result:
-            print(f"\nRESULTADO:")
-            print(f"   Manter: {len(result['columns_to_keep'])} colunas")  
+            print("\nRESULTADO:")
+            print(f"   Manter: {len(result['columns_to_keep'])} colunas")
             print(f"   Excluir: {len(result['columns_to_exclude'])} colunas")
             print(f"   Query executada: {result['query_executed']}")
             print(f"   Parâmetros: {result['query_params']}")
-            
     else:
         print("ERRO: Não foi possível conectar")
