@@ -65,8 +65,14 @@ def get_connection_sqlserver():
     
     return None, None
 
-def query_sqlserver_safe(query):
-    """Executa query SQL Server com conexão robusta"""
+def query_sqlserver_safe(query, params=None):
+    """
+    Executa query SQL Server com conexão robusta e suporte a parâmetros
+    
+    Args:
+        query: Query SQL (pode usar ? para parâmetros com pyodbc ou %s para pymssql)
+        params: Tupla com parâmetros para a query
+    """
     conn, method = get_connection_sqlserver()
     
     if not conn:
@@ -74,7 +80,10 @@ def query_sqlserver_safe(query):
         return pd.DataFrame()
     
     try:
-        df = pd.read_sql(query, conn)
+        if params:
+            df = pd.read_sql(query, conn, params=params)
+        else:
+            df = pd.read_sql(query, conn)
         conn.close()
         return df
     except Exception as e:
@@ -82,130 +91,126 @@ def query_sqlserver_safe(query):
         conn.close()
         return pd.DataFrame()
 
-def get_table_row_count(table_name, schema='dbo'):
-    """Obtém o número total de linhas da tabela"""
-    query = f"SELECT COUNT(*) as total_rows FROM {schema}.{table_name}"
-    result = query_sqlserver_safe(query)
-    return result.iloc[0]['total_rows'] if not result.empty else None
-
-def detect_date_columns(df):
-    """Detecta colunas que podem ser usadas como filtro de data"""
-    date_columns = []
+def build_filtered_query(table_name, schema='dbo', filters=None, columns=None):
+    """
+    Constrói query SQL com filtros parametrizados
     
-    for col in df.columns:
-        col_data = df[col].dropna()
-        if len(col_data) == 0:
-            continue
-            
-        # Verificar se é datetime
-        if pd.api.types.is_datetime64_any_dtype(col_data):
-            date_columns.append(col)
-            continue
-            
-        # Tentar converter strings para datetime
-        if pd.api.types.is_object_dtype(col_data):
-            try:
-                # Tentar converter uma amostra pequena primeiro
-                sample = col_data.head(min(100, len(col_data)))
-                pd.to_datetime(sample, errors='raise')
-                date_columns.append(col)
-            except:
-                pass
+    Args:
+        table_name: Nome da tabela
+        schema: Schema da tabela
+        filters: Dict com filtros {'coluna': {'operator': '>=', 'value': '2022-01-01'}}
+        columns: Lista de colunas específicas (None = todas)
     
-    return date_columns
-
-def analyze_full_table_variance(table_name, schema='dbo'):
-    """Analisa variância considerando a tabela completa para colunas críticas"""
-    
-    # Query para verificar variabilidade em toda a tabela
-    variance_query = f"""
-    SELECT 
-        COLUMN_NAME,
-        DATA_TYPE
-    FROM INFORMATION_SCHEMA.COLUMNS 
-    WHERE TABLE_SCHEMA = '{schema}' AND TABLE_NAME = '{table_name}'
-    ORDER BY ORDINAL_POSITION
+    Returns:
+        tuple: (query_string, params_tuple)
     """
     
-    columns_info = query_sqlserver_safe(variance_query)
-    if columns_info.empty:
-        return {}
+    # Construir SELECT
+    if columns:
+        select_clause = ', '.join(columns)
+    else:
+        select_clause = '*'
     
-    variance_results = {}
+    # Query base
+    query = f"SELECT {select_clause} FROM {schema}.{table_name}"
+    params = []
     
-    # Para cada coluna, verificar se tem apenas um valor único
-    for _, col_info in columns_info.iterrows():
-        col_name = col_info['COLUMN_NAME']
+    # Adicionar filtros WHERE
+    if filters:
+        where_conditions = []
+        for col_name, filter_config in filters.items():
+            operator = filter_config.get('operator', '=')
+            value = filter_config['value']
+            
+            # Validar operadores seguros
+            safe_operators = ['=', '!=', '>', '>=', '<', '<=', 'LIKE', 'IN', 'NOT IN']
+            if operator.upper() not in safe_operators:
+                raise ValueError(f"Operador não permitido: {operator}")
+            
+            if operator.upper() == 'IN':
+                # Para operador IN, value deve ser uma lista
+                if not isinstance(value, (list, tuple)):
+                    value = [value]
+                placeholders = ', '.join(['?' for _ in value])
+                where_conditions.append(f"{col_name} IN ({placeholders})")
+                params.extend(value)
+            elif operator.upper() == 'NOT IN':
+                # Para operador NOT IN, value deve ser uma lista
+                if not isinstance(value, (list, tuple)):
+                    value = [value]
+                placeholders = ', '.join(['?' for _ in value])
+                where_conditions.append(f"{col_name} NOT IN ({placeholders})")
+                params.extend(value)
+            else:
+                where_conditions.append(f"{col_name} {operator} ?")
+                params.append(value)
         
-        # Query para contar valores distintos (excluindo nulos)
-        distinct_query = f"""
-        SELECT COUNT(DISTINCT {col_name}) as distinct_count
-        FROM {schema}.{table_name}
-        WHERE {col_name} IS NOT NULL
-        """
-        
-        try:
-            result = query_sqlserver_safe(distinct_query)
-            if not result.empty:
-                distinct_count = result.iloc[0]['distinct_count']
-                variance_results[col_name] = {
-                    'distinct_count': distinct_count,
-                    'zero_variance': distinct_count <= 1
-                }
-        except Exception as e:
-            print(f"Erro ao analisar variância da coluna {col_name}: {e}")
-            variance_results[col_name] = {
-                'distinct_count': None,
-                'zero_variance': False
-            }
+        if where_conditions:
+            query += " WHERE " + " AND ".join(where_conditions)
     
-    return variance_results
+    return query, tuple(params)
 
-def identify_columns_to_exclude(table_name, schema='dbo', sample_size=5000, 
-                               null_threshold=90, zero_threshold=95, 
-                               analyze_full_table=True):
+def identify_columns_to_exclude(table_name, schema='dbo', filters=None, 
+                               null_threshold=90, low_variance_threshold=1, 
+                               zero_threshold=95):
     """
     Identifica colunas candidatas à exclusão baseado em critérios específicos
     
     Parâmetros:
+    - table_name: Nome da tabela
+    - schema: Schema da tabela  
+    - filters: Dict com filtros {'coluna': {'operator': '>=', 'value': '2022-01-01'}}
     - null_threshold: % de nulos acima do qual a coluna é candidata à exclusão
+    - low_variance_threshold: % de valores únicos abaixo do qual é baixa variância
     - zero_threshold: % de zeros acima do qual pode ser problemática
-    - analyze_full_table: Se True, analisa variância na tabela completa
+    
+    Exemplo de uso:
+    filters = {
+        'data_criacao': {'operator': '>=', 'value': '2022-01-01'},
+        'status': {'operator': 'IN', 'value': ['ATIVO', 'PENDENTE']},
+        'valor': {'operator': '>', 'value': 0}
+    }
     """
     
     print(f"\nIDENTIFICANDO COLUNAS PARA EXCLUSÃO")
     print(f"Tabela: {schema}.{table_name}")
-    print(f"Critérios: Nulos >{null_threshold}%, Zeros >{zero_threshold}%, Variância = 0 (valor único)")
+    
+    # Mostrar filtros aplicados
+    if filters:
+        print("Filtros aplicados:")
+        for col, filter_config in filters.items():
+            op = filter_config['operator']
+            val = filter_config['value']
+            print(f"  - {col} {op} {val}")
+    else:
+        print("Sem filtros aplicados")
+    
+    print(f"Critérios: Nulos >{null_threshold}%, Variância <{low_variance_threshold}%, Zeros >{zero_threshold}%")
     print("=" * 70)
     
-    # Obter informações da tabela completa
-    total_rows = get_table_row_count(table_name, schema)
-    if total_rows:
-        print(f"Total de registros na tabela: {total_rows:,}")
-    
-    # Analisar variância na tabela completa se solicitado
-    full_table_variance = {}
-    if analyze_full_table:
-        print("Analisando variância na tabela completa...")
-        full_table_variance = analyze_full_table_variance(table_name, schema)
-    
-    # Carregar amostra dos dados
-    query = f"SELECT TOP {sample_size} * FROM {schema}.{table_name}"
-    df = query_sqlserver_safe(query)
+    # Construir e executar query
+    try:
+        query, params = build_filtered_query(
+            table_name=table_name,
+            schema=schema,
+            filters=filters
+        )
+        
+        print(f"Query executada: {query}")
+        if params:
+            print(f"Parâmetros: {params}")
+        
+        df = query_sqlserver_safe(query, params)
+        
+    except Exception as e:
+        print(f"Erro ao construir query: {e}")
+        return None
     
     if df.empty:
         print("Não foi possível carregar dados da tabela")
         return None
     
-    print(f"Analisando amostra de {len(df):,} registros, {len(df.columns)} colunas")
-    
-    # Detectar colunas de data
-    date_columns = detect_date_columns(df)
-    if date_columns:
-        print(f"Colunas de data detectadas: {', '.join(date_columns)}")
-        print("SUGESTÃO: Use uma dessas colunas para filtros temporais em análises futuras")
-    else:
-        print("Nenhuma coluna de data detectada")
+    print(f"Analisando {len(df):,} registros, {len(df.columns)} colunas")
     
     # Lista para armazenar todas as análises
     columns_to_exclude = []
@@ -226,25 +231,19 @@ def identify_columns_to_exclude(table_name, schema='dbo', sample_size=5000,
         unique_count = col_data.nunique() if len(col_data) > 0 else 0
         unique_percent = (unique_count / len(col_data)) * 100 if len(col_data) > 0 else 0
         
-        # Usar análise da tabela completa se disponível
-        if col in full_table_variance:
-            full_unique_count = full_table_variance[col]['distinct_count']
-            is_zero_variance_full = full_table_variance[col]['zero_variance']
-        else:
-            full_unique_count = unique_count
-            is_zero_variance_full = unique_count <= 1
-        
         # 1. ANÁLISE DE NULOS
         if null_percent >= null_threshold:
             reasons.append(f"MUITOS NULOS ({null_percent:.1f}%)")
         
-        # 2. ANÁLISE DE VARIÂNCIA - APENAS ZERO VARIÂNCIA (valor único)
-        if len(col_data) > 0 and is_zero_variance_full:
-            if full_unique_count == 0:
-                reasons.append("SEM DADOS VÁLIDOS")
-            elif full_unique_count == 1:
-                sample_value = col_data.iloc[0] if len(col_data) > 0 else "N/A"
-                reasons.append(f"VALOR ÚNICO ({sample_value})")
+        # 2. ANÁLISE DE VARIÂNCIA (apenas se tiver dados)
+        if len(col_data) > 0:
+            # Coluna com valor único
+            if unique_count == 1:
+                reasons.append(f"VALOR ÚNICO ({col_data.iloc[0]})")
+            
+            # Coluna com baixa variância
+            elif unique_percent < low_variance_threshold:
+                reasons.append(f"BAIXA VARIÂNCIA ({unique_count} valores únicos)")
         
         # 3. ANÁLISE DE ZEROS (para colunas numéricas)
         zero_percent = 0
@@ -276,18 +275,11 @@ def identify_columns_to_exclude(table_name, schema='dbo', sample_size=5000,
             reason_text = " | ".join(reasons)
         else:
             action = "MANTER"
-            reason_text = f"{full_unique_count if full_unique_count else unique_count} únicos"
-            if null_percent > 0:
-                reason_text += f", {null_percent:.1f}% nulos"
+            reason_text = f"{unique_count} únicos ({unique_percent:.1f}%), {null_percent:.1f}% nulos"
             if zero_percent > 0:
                 reason_text += f", {zero_percent:.1f}% zeros"
             if empty_percent > 0:
                 reason_text += f", {empty_percent:.1f}% vazias"
-        
-        # Marcar colunas de data
-        col_display = col
-        if col in date_columns:
-            col_display += " [DATA]"
         
         # Armazenar análise completa
         all_column_analysis.append({
@@ -295,22 +287,20 @@ def identify_columns_to_exclude(table_name, schema='dbo', sample_size=5000,
             'Acao': action,
             'Nulos_Count': null_count,
             'Nulos_Percent': round(null_percent, 1),
-            'Valores_Unicos_Amostra': unique_count,
-            'Valores_Unicos_Tabela': full_unique_count if full_unique_count else unique_count,
+            'Valores_Unicos': unique_count,
+            'Variancia_Percent': round(unique_percent, 1),
             'Zeros_Percent': round(zero_percent, 1),
             'Vazias_Percent': round(empty_percent, 1),
             'Motivos': " | ".join(reasons) if reasons else "OK",
-            'Tipo_Dados': str(df[col].dtype),
-            'Coluna_Data': col in date_columns
+            'Tipo_Dados': str(df[col].dtype)
         })
         
-        print(f"{col_display:<30} {action:<8} - {reason_text}")
+        print(f"{col:<25} {action:<8} - {reason_text}")
     
     # RESUMO FINAL
     print(f"\nRESUMO DA ANÁLISE:")
     print("-" * 50)
     print(f"Total de colunas analisadas: {len(df.columns)}")
-    print(f"Colunas de data detectadas: {len(date_columns)}")
     print(f"Colunas para MANTER: {len(df.columns) - len(columns_to_exclude)}")
     print(f"Colunas para EXCLUIR: {len(columns_to_exclude)}")
     
@@ -333,7 +323,20 @@ def identify_columns_to_exclude(table_name, schema='dbo', sample_size=5000,
         columns_select = ', '.join(good_columns)
         print(f"SELECT {columns_select}")
         print(f"INTO {schema}.{table_name}_cleaned")
-        print(f"FROM {schema}.{table_name};")
+        print(f"FROM {schema}.{table_name}")
+        if filters:
+            # Recriar WHERE clause para o comando final
+            where_parts = []
+            for col_name, filter_config in filters.items():
+                op = filter_config['operator']
+                val = filter_config['value']
+                if isinstance(val, str):
+                    val = f"'{val}'"
+                elif isinstance(val, (list, tuple)):
+                    val = "(" + ", ".join([f"'{v}'" if isinstance(v, str) else str(v) for v in val]) + ")"
+                where_parts.append(f"{col_name} {op} {val}")
+            print(f"WHERE {' AND '.join(where_parts)}")
+        print(";")
     
     else:
         print("\nNENHUMA COLUNA PRECISA SER EXCLUÍDA!")
@@ -347,36 +350,32 @@ def identify_columns_to_exclude(table_name, schema='dbo', sample_size=5000,
     try:
         df_analysis = pd.DataFrame(all_column_analysis)
         
-        with pd.ExcelWriter(f"{filename}.xlsx", engine='xlsxwriter') as writer:
+        with pd.ExcelWriter(f"{filename}.xlsx", engine='openpyxl') as writer:
             # Aba principal com análise de todas as colunas
             df_analysis.to_excel(writer, sheet_name='Analise_Completa', index=False)
             
             # Aba resumo
             summary_data = {
                 'Métrica': [
-                    'Total de Registros (Tabela)',
-                    'Registros Analisados (Amostra)',
                     'Total de Colunas',
-                    'Colunas de Data',
                     'Colunas para Manter', 
                     'Colunas para Excluir',
                     'Percentual de Exclusão',
                     'Critério Nulos (%)',
+                    'Critério Variância (%)',
                     'Critério Zeros (%)',
-                    'Critério Variância',
+                    'Filtros Aplicados',
                     'Data/Hora Análise'
                 ],
                 'Valor': [
-                    total_rows if total_rows else 'N/A',
-                    len(df),
                     len(df.columns),
-                    len(date_columns),
                     len(df.columns) - len(columns_to_exclude),
                     len(columns_to_exclude),
                     f"{(len(columns_to_exclude)/len(df.columns))*100:.1f}%",
                     f">{null_threshold}%",
+                    f"<{low_variance_threshold}%", 
                     f">{zero_threshold}%",
-                    "Apenas valor único",
+                    str(filters) if filters else "Nenhum",
                     datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 ]
             }
@@ -390,17 +389,11 @@ def identify_columns_to_exclude(table_name, schema='dbo', sample_size=5000,
             # Aba apenas com colunas para manter
             df_keep = df_analysis[df_analysis['Acao'] == 'MANTER'].copy()
             df_keep.to_excel(writer, sheet_name='Colunas_Manter', index=False)
-            
-            # Aba com colunas de data (se existirem)
-            if date_columns:
-                df_dates = df_analysis[df_analysis['Coluna_Data'] == True].copy()
-                df_dates.to_excel(writer, sheet_name='Colunas_Data', index=False)
         
         print(f"\nRelatório Excel salvo: {filename}.xlsx")
         
     except Exception as e:
         print(f"Erro ao salvar Excel: {e}")
-        print("Tentando instalar xlsxwriter: pip install xlsxwriter")
     
     # Salvar CSV simples
     try:
@@ -412,40 +405,57 @@ def identify_columns_to_exclude(table_name, schema='dbo', sample_size=5000,
     
     # Retornar informações úteis
     return {
-        'total_rows': total_rows,
         'total_columns': len(df.columns),
-        'date_columns': date_columns,
         'columns_to_exclude': columns_to_exclude,
         'columns_to_keep': [col for col in df.columns if col not in columns_to_exclude],
         'exclusion_reasons': exclusion_reasons,
         'all_analysis': all_column_analysis,
         'dataframe': df,
-        'report_filename': filename
+        'report_filename': filename,
+        'query_executed': query,
+        'query_params': params
     }
 
-def analyze_for_exclusion(table_name, schema='dbo', sample_size=5000, strict=False):
+def analyze_for_exclusion(table_name, schema='dbo', strict=False, filters=None):
     """
-    Função simplificada para análise de exclusão
+    Função simplificada para análise de exclusão com filtros flexíveis
     
-    strict=True: Critérios mais rigorosos
-    strict=False: Critérios mais flexíveis
+    Args:
+        table_name: Nome da tabela
+        schema: Schema da tabela
+        strict: True para critérios rigorosos, False para flexíveis
+        filters: Dict com filtros {'coluna': {'operator': '>=', 'value': '2022-01-01'}}
+    
+    Exemplos de uso:
+    
+    # Filtro simples por data
+    filters = {'data_criacao': {'operator': '>=', 'value': '2022-01-01'}}
+    
+    # Múltiplos filtros
+    filters = {
+        'data_criacao': {'operator': '>=', 'value': '2022-01-01'},
+        'status': {'operator': 'IN', 'value': ['ATIVO', 'PENDENTE']},
+        'valor': {'operator': '>', 'value': 0}
+    }
     """
     
     if strict:
         # Critérios rigorosos
         return identify_columns_to_exclude(
-            table_name, schema, sample_size,
+            table_name, schema,
+            filters=filters,
             null_threshold=70,      # 70% de nulos
             low_variance_threshold=2,   # <2% de valores únicos
             zero_threshold=90       # 90% de zeros
         )
     else:
-        # Critérios mais flexíveis (padrão)
+        # Critérios flexíveis
         return identify_columns_to_exclude(
-            table_name, schema, sample_size,
+            table_name, schema,
+            filters=filters,
             null_threshold=90,      # 90% de nulos
-            low_variance_threshold=1,   # <1% de valores únicos  
-            zero_threshold=95       # 95% de zeros
+            low_variance_threshold=0.1,   # <0.1% de valores únicos  
+            zero_threshold=80       # 80% de zeros
         )
 
 if __name__ == "__main__":
@@ -458,14 +468,25 @@ if __name__ == "__main__":
         print(f"Conexão OK usando {method}")
         conn.close()
         
+        # Exemplo de uso com filtros
+        filters = {
+            'data_criacao': {'operator': '>=', 'value': '2022-01-01'}
+        }
+        
         # Análise para exclusão
-        result = analyze_for_exclusion('Clientes', 'dbo', 3000, strict=False)
+        result = analyze_for_exclusion(
+            table_name='Clientes', 
+            schema='dbo', 
+            strict=False,
+            filters=filters
+        )
         
         if result:
             print(f"\nRESULTADO:")
             print(f"   Manter: {len(result['columns_to_keep'])} colunas")  
             print(f"   Excluir: {len(result['columns_to_exclude'])} colunas")
-            print(f"   Relatório salvo: {result['report_filename']}.xlsx/.csv")
+            print(f"   Query executada: {result['query_executed']}")
+            print(f"   Parâmetros: {result['query_params']}")
             
     else:
         print("ERRO: Não foi possível conectar")
