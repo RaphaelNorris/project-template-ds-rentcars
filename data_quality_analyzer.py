@@ -82,13 +82,22 @@ def query_sqlserver_safe(query):
         conn.close()
         return pd.DataFrame()
 
-def analyze_data_quality_simple(table_name, schema='dbo', sample_size=5000):
-    """Análise de qualidade de dados simplificada"""
+def identify_columns_to_exclude(table_name, schema='dbo', sample_size=5000, 
+                               null_threshold=90, low_variance_threshold=1, 
+                               zero_threshold=95):
+    """
+    Identifica colunas candidatas à exclusão baseado em critérios específicos
     
-    print(f"\nANALISE DE QUALIDADE DE DADOS")
-    print(f"Data/Hora: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    Parâmetros:
+    - null_threshold: % de nulos acima do qual a coluna é candidata à exclusão
+    - low_variance_threshold: % de valores únicos abaixo do qual é baixa variância
+    - zero_threshold: % de zeros acima do qual pode ser problemática
+    """
+    
+    print(f"\nIDENTIFICANDO COLUNAS PARA EXCLUSÃO")
     print(f"Tabela: {schema}.{table_name}")
-    print("=" * 60)
+    print(f"Critérios: Nulos >{null_threshold}%, Variância <{low_variance_threshold}%, Zeros >{zero_threshold}%")
+    print("=" * 70)
     
     # Carregar dados
     query = f"SELECT TOP {sample_size} * FROM {schema}.{table_name}"
@@ -98,157 +107,237 @@ def analyze_data_quality_simple(table_name, schema='dbo', sample_size=5000):
         print("Não foi possível carregar dados da tabela")
         return None
     
-    print(f"Carregados {len(df):,} registros para análise")
+    print(f"Analisando {len(df):,} registros, {len(df.columns)} colunas")
     
-    # Análise de nulos
-    print(f"\n1. ANALISE DE VALORES NULOS")
-    print("-" * 40)
+    # Lista para armazenar todas as análises
+    columns_to_exclude = []
+    exclusion_reasons = {}
+    all_column_analysis = []
     
-    null_analysis = []
-    total_rows = len(df)
+    print(f"\nANALISE DETALHADA DE TODAS AS COLUNAS:")
+    print("-" * 70)
     
     for col in df.columns:
-        null_count = df[col].isnull().sum()
-        null_percent = (null_count / total_rows) * 100
+        col_data = df[col].dropna()
+        total_data = df[col]
+        reasons = []
         
-        if null_percent == 0:
-            level = "OK"
-        elif null_percent < 10:
-            level = "BAIXO"
-        elif null_percent < 30:
-            level = "MEDIO"
+        # Calcular métricas básicas
+        null_count = total_data.isnull().sum()
+        null_percent = (null_count / len(total_data)) * 100
+        unique_count = col_data.nunique() if len(col_data) > 0 else 0
+        unique_percent = (unique_count / len(col_data)) * 100 if len(col_data) > 0 else 0
+        
+        # 1. ANÁLISE DE NULOS
+        if null_percent >= null_threshold:
+            reasons.append(f"MUITOS NULOS ({null_percent:.1f}%)")
+        
+        # 2. ANÁLISE DE VARIÂNCIA (apenas se tiver dados)
+        if len(col_data) > 0:
+            # Coluna com valor único
+            if unique_count == 1:
+                reasons.append(f"VALOR ÚNICO ({col_data.iloc[0]})")
+            
+            # Coluna com baixa variância
+            elif unique_percent < low_variance_threshold:
+                reasons.append(f"BAIXA VARIÂNCIA ({unique_count} valores únicos)")
+        
+        # 3. ANÁLISE DE ZEROS (para colunas numéricas)
+        zero_percent = 0
+        if len(col_data) > 0 and pd.api.types.is_numeric_dtype(col_data):
+            zero_count = (col_data == 0).sum()
+            zero_percent = (zero_count / len(col_data)) * 100
+            
+            if zero_percent >= zero_threshold:
+                reasons.append(f"MUITOS ZEROS ({zero_percent:.1f}%)")
+        
+        # 4. ANÁLISE DE STRINGS VAZIAS
+        empty_percent = 0
+        if len(col_data) > 0 and (pd.api.types.is_string_dtype(col_data) or pd.api.types.is_object_dtype(col_data)):
+            try:
+                str_data = col_data.astype(str).str.strip()
+                empty_count = (str_data == '').sum()
+                empty_percent = (empty_count / len(str_data)) * 100
+                
+                if empty_percent >= zero_threshold:
+                    reasons.append(f"STRINGS VAZIAS ({empty_percent:.1f}%)")
+            except:
+                pass
+        
+        # Determinar ação e salvar análise completa
+        if reasons:
+            columns_to_exclude.append(col)
+            exclusion_reasons[col] = reasons
+            action = "EXCLUIR"
+            reason_text = " | ".join(reasons)
         else:
-            level = "ALTO"
+            action = "MANTER"
+            reason_text = f"{unique_count} únicos ({unique_percent:.1f}%), {null_percent:.1f}% nulos"
+            if zero_percent > 0:
+                reason_text += f", {zero_percent:.1f}% zeros"
+            if empty_percent > 0:
+                reason_text += f", {empty_percent:.1f}% vazias"
         
-        null_analysis.append({
+        # Armazenar análise completa
+        all_column_analysis.append({
             'Coluna': col,
-            'Nulos': null_count,
-            'Percent': round(null_percent, 1),
-            'Level': level
+            'Acao': action,
+            'Nulos_Count': null_count,
+            'Nulos_Percent': round(null_percent, 1),
+            'Valores_Unicos': unique_count,
+            'Variancia_Percent': round(unique_percent, 1),
+            'Zeros_Percent': round(zero_percent, 1),
+            'Vazias_Percent': round(empty_percent, 1),
+            'Motivos': " | ".join(reasons) if reasons else "OK",
+            'Tipo_Dados': str(df[col].dtype)
         })
+        
+        print(f"{col:<25} {action:<8} - {reason_text}")
     
-    # Mostrar apenas colunas com problemas
-    problem_nulls = [x for x in null_analysis if x['Percent'] > 0]
-    if problem_nulls:
-        for item in sorted(problem_nulls, key=lambda x: x['Percent'], reverse=True)[:10]:
-            print(f"{item['Coluna']:<20} {item['Nulos']:>6} ({item['Percent']:>5.1f}%) - {item['Level']}")
+    # RESUMO FINAL
+    print(f"\nRESUMO DA ANÁLISE:")
+    print("-" * 50)
+    print(f"Total de colunas analisadas: {len(df.columns)}")
+    print(f"Colunas para MANTER: {len(df.columns) - len(columns_to_exclude)}")
+    print(f"Colunas para EXCLUIR: {len(columns_to_exclude)}")
+    
+    if columns_to_exclude:
+        print(f"\nLISTA COMPLETA DE EXCLUSÃO:")
+        print("-" * 40)
+        for i, col in enumerate(columns_to_exclude, 1):
+            reasons_text = " | ".join(exclusion_reasons[col])
+            print(f"{i:2d}. {col} → {reasons_text}")
+        
+        # GERAR COMANDO SQL
+        print(f"\nCOMANDO SQL PARA EXCLUSÃO:")
+        print("-" * 40)
+        print(f"-- Excluir {len(columns_to_exclude)} colunas da tabela {schema}.{table_name}")
+        print(f"ALTER TABLE {schema}.{table_name}")
+        print(f"DROP COLUMN {', '.join(columns_to_exclude)};")
+        
+        print(f"\n-- Ou criar nova tabela apenas com colunas úteis:")
+        good_columns = [col for col in df.columns if col not in columns_to_exclude]
+        columns_select = ', '.join(good_columns)
+        print(f"SELECT {columns_select}")
+        print(f"INTO {schema}.{table_name}_cleaned")
+        print(f"FROM {schema}.{table_name};")
+    
     else:
-        print("Nenhuma coluna com valores nulos encontrada")
+        print("\nNENHUMA COLUNA PRECISA SER EXCLUÍDA!")
+        print("Todas as colunas atendem aos critérios de qualidade.")
     
-    # Análise de variabilidade
-    print(f"\n2. ANALISE DE VARIABILIDADE")
-    print("-" * 40)
+    # Salvar relatório
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    filename = f"data_quality_{table_name}_{timestamp}"
     
-    var_problems = []
-    
-    for col in df.columns:
-        col_data = df[col].dropna()
-        if len(col_data) == 0:
-            continue
+    # Salvar Excel com análise completa
+    try:
+        df_analysis = pd.DataFrame(all_column_analysis)
         
-        unique_count = col_data.nunique()
-        unique_percent = (unique_count / len(col_data)) * 100
-        
-        # Problemas de variabilidade
-        if unique_count == 1:
-            var_problems.append(f"ZERO VARIACAO - {col}: Todos valores iguais a '{col_data.iloc[0]}'")
-        elif unique_percent < 1:
-            var_problems.append(f"BAIXA VARIACAO - {col}: Apenas {unique_count} valores únicos")
-        
-        # Para colunas numéricas, verificar zeros
-        if pd.api.types.is_numeric_dtype(col_data):
-            zero_percent = (col_data == 0).sum() / len(col_data) * 100
-            if zero_percent > 70:
-                var_problems.append(f"MUITOS ZEROS - {col}: {zero_percent:.1f}% são zeros")
-    
-    if var_problems:
-        for problem in var_problems[:10]:  # Mostrar apenas os 10 primeiros
-            print(problem)
-    else:
-        print("Nenhum problema de variabilidade crítico encontrado")
-    
-    # Análise de padrões
-    print(f"\n3. PADROES PROBLEMATICOS")
-    print("-" * 40)
-    
-    pattern_problems = []
-    
-    for col in df.columns:
-        col_data = df[col].dropna()
-        if len(col_data) == 0:
-            continue
-        
-        # Para strings, verificar vazias
-        if pd.api.types.is_string_dtype(col_data) or pd.api.types.is_object_dtype(col_data):
-            str_data = col_data.astype(str).str.strip()
-            empty_percent = (str_data == '').sum() / len(str_data) * 100
+        with pd.ExcelWriter(f"{filename}.xlsx", engine='openpyxl') as writer:
+            # Aba principal com análise de todas as colunas
+            df_analysis.to_excel(writer, sheet_name='Analise_Completa', index=False)
             
-            if empty_percent > 50:
-                pattern_problems.append(f"STRINGS VAZIAS - {col}: {empty_percent:.1f}% vazias")
+            # Aba resumo
+            summary_data = {
+                'Métrica': [
+                    'Total de Colunas',
+                    'Colunas para Manter', 
+                    'Colunas para Excluir',
+                    'Percentual de Exclusão',
+                    'Critério Nulos (%)',
+                    'Critério Variância (%)',
+                    'Critério Zeros (%)',
+                    'Data/Hora Análise'
+                ],
+                'Valor': [
+                    len(df.columns),
+                    len(df.columns) - len(columns_to_exclude),
+                    len(columns_to_exclude),
+                    f"{(len(columns_to_exclude)/len(df.columns))*100:.1f}%",
+                    f">{null_threshold}%",
+                    f"<{low_variance_threshold}%", 
+                    f">{zero_threshold}%",
+                    datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                ]
+            }
+            pd.DataFrame(summary_data).to_excel(writer, sheet_name='Resumo', index=False)
             
-            # Verificar dominância de um valor
-            if len(str_data) > 1:
-                top_value_percent = str_data.value_counts().iloc[0] / len(str_data) * 100
-                if top_value_percent > 95:
-                    top_value = str_data.value_counts().index[0]
-                    pattern_problems.append(f"VALOR DOMINANTE - {col}: {top_value_percent:.1f}% são '{top_value}'")
+            # Aba apenas com colunas para excluir
+            if columns_to_exclude:
+                df_exclude = df_analysis[df_analysis['Acao'] == 'EXCLUIR'].copy()
+                df_exclude.to_excel(writer, sheet_name='Colunas_Excluir', index=False)
+            
+            # Aba apenas com colunas para manter
+            df_keep = df_analysis[df_analysis['Acao'] == 'MANTER'].copy()
+            df_keep.to_excel(writer, sheet_name='Colunas_Manter', index=False)
+        
+        print(f"\nRelatório Excel salvo: {filename}.xlsx")
+        
+    except Exception as e:
+        print(f"Erro ao salvar Excel: {e}")
     
-    if pattern_problems:
-        for problem in pattern_problems:
-            print(problem)
-    else:
-        print("Nenhum padrão problemático identificado")
+    # Salvar CSV simples
+    try:
+        df_analysis = pd.DataFrame(all_column_analysis)
+        df_analysis.to_csv(f"{filename}.csv", index=False, encoding='utf-8')
+        print(f"Relatório CSV salvo: {filename}.csv")
+    except Exception as e:
+        print(f"Erro ao salvar CSV: {e}")
     
-    # Resumo
-    print(f"\n4. RESUMO GERAL")
-    print("-" * 40)
-    
-    total_cols = len(df.columns)
-    null_problems = len([x for x in null_analysis if x['Percent'] > 10])
-    var_problem_count = len(var_problems)
-    pattern_problem_count = len(pattern_problems)
-    
-    total_problems = null_problems + var_problem_count + pattern_problem_count
-    quality_score = max(0, ((total_cols - total_problems) / total_cols) * 100)
-    
-    print(f"Total de colunas: {total_cols}")
-    print(f"Colunas com +10% nulos: {null_problems}")
-    print(f"Problemas de variabilidade: {var_problem_count}")
-    print(f"Problemas de padrões: {pattern_problem_count}")
-    print(f"Score de qualidade: {quality_score:.1f}%")
-    
-    if quality_score >= 80:
-        print("STATUS: EXCELENTE")
-    elif quality_score >= 60:
-        print("STATUS: BOA")
-    elif quality_score >= 40:
-        print("STATUS: REGULAR")
-    else:
-        print("STATUS: RUIM")
-    
-    return df
+    # Retornar informações úteis
+    return {
+        'total_columns': len(df.columns),
+        'columns_to_exclude': columns_to_exclude,
+        'columns_to_keep': [col for col in df.columns if col not in columns_to_exclude],
+        'exclusion_reasons': exclusion_reasons,
+        'all_analysis': all_column_analysis,
+        'dataframe': df,
+        'report_filename': filename
+    }
 
-# Função principal
-def analyze_table(table_name, schema='dbo', sample_size=5000):
-    """Função principal para análise de qualidade"""
-    return analyze_data_quality_simple(table_name, schema, sample_size)
+def analyze_for_exclusion(table_name, schema='dbo', sample_size=5000, strict=False):
+    """
+    Função simplificada para análise de exclusão
+    
+    strict=True: Critérios mais rigorosos
+    strict=False: Critérios mais flexíveis
+    """
+    
+    if strict:
+        # Critérios rigorosos
+        return identify_columns_to_exclude(
+            table_name, schema, sample_size,
+            null_threshold=70,      # 70% de nulos
+            low_variance_threshold=2,   # <2% de valores únicos
+            zero_threshold=90       # 90% de zeros
+        )
+    else:
+        # Critérios mais flexíveis (padrão)
+        return identify_columns_to_exclude(
+            table_name, schema, sample_size,
+            null_threshold=90,      # 90% de nulos
+            low_variance_threshold=1,   # <1% de valores únicos  
+            zero_threshold=95       # 95% de zeros
+        )
 
 if __name__ == "__main__":
-    # Teste
-    print("TESTE DE CONEXAO E ANALISE")
+    print("ANALISADOR DE COLUNAS PARA EXCLUSÃO")
     print("=" * 50)
     
-    # Testar conexão primeiro
+    # Testar conexão
     conn, method = get_connection_sqlserver()
     if conn:
-        print(f"Conexão OK usando {method}")
+        print(f"✅ Conexão OK usando {method}")
         conn.close()
         
-        # Fazer análise
-        result = analyze_table('Clientes', 'dbo', 3000)
+        # Análise para exclusão
+        result = analyze_for_exclusion('Clientes', 'dbo', 3000, strict=False)
+        
+        if result:
+            print(f"\n🎯 RESULTADO:")
+            print(f"   Manter: {len(result['columns_to_keep'])} colunas")  
+            print(f"   Excluir: {len(result['columns_to_exclude'])} colunas")
+            
     else:
-        print("ERRO: Não foi possível conectar")
-        print("\nSOLUCOES:")
-        print("1. Instalar pymssql: pip install pymssql")
-        print("2. Verificar .env com credenciais")
-        print("3. Verificar conectividade de rede")
+        print("❌ ERRO: Não foi possível conectar")
