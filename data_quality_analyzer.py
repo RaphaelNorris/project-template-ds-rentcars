@@ -150,9 +150,152 @@ def build_filtered_query(table_name, schema='dbo', filters=None, columns=None):
     
     return query, tuple(params)
 
+def generate_markdown_report(all_column_analysis, table_name, schema, filters, 
+                           columns_to_exclude, exclusion_reasons, query, params):
+    """Gera relatório em markdown"""
+    
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    # Iniciar markdown
+    markdown = f"""# Relatório de Análise de Qualidade de Dados
+
+## Informações Gerais
+- **Tabela:** {schema}.{table_name}
+- **Data/Hora:** {timestamp}
+- **Total de Registros:** {len(all_column_analysis[0]['Dataframe']) if all_column_analysis else 'N/A'}
+- **Total de Colunas:** {len(all_column_analysis)}
+
+## Filtros Aplicados
+"""
+    
+    if filters:
+        for col, filter_config in filters.items():
+            op = filter_config['operator']
+            val = filter_config['value']
+            markdown += f"- **{col}** {op} `{val}`\n"
+    else:
+        markdown += "- Nenhum filtro aplicado\n"
+    
+    markdown += f"""
+## Query Executada
+```sql
+{query}
+```
+
+"""
+    
+    if params:
+        markdown += f"**Parâmetros:** {params}\n\n"
+    
+    # Resumo
+    total_cols = len(all_column_analysis)
+    exclude_count = len(columns_to_exclude)
+    keep_count = total_cols - exclude_count
+    
+    markdown += f"""## Resumo da Análise
+
+| Métrica | Valor |
+|---------|-------|
+| **Total de Colunas** | {total_cols} |
+| **Colunas para Manter** | {keep_count} |
+| **Colunas para Excluir** | {exclude_count} |
+| **Percentual de Exclusão** | {(exclude_count/total_cols)*100:.1f}% |
+
+"""
+    
+    # Colunas para exclusão
+    if columns_to_exclude:
+        markdown += """## Colunas Sugeridas para Exclusão
+
+| # | Coluna | Motivos |
+|---|--------|---------|
+"""
+        for i, col in enumerate(columns_to_exclude, 1):
+            reasons_text = " | ".join(exclusion_reasons[col])
+            markdown += f"| {i} | `{col}` | {reasons_text} |\n"
+        
+        markdown += f"""
+## Comandos SQL Sugeridos
+
+### Excluir Colunas da Tabela Existente
+```sql
+-- Excluir {exclude_count} colunas da tabela {schema}.{table_name}
+ALTER TABLE {schema}.{table_name}
+DROP COLUMN {', '.join(columns_to_exclude)};
+```
+
+### Criar Nova Tabela Limpa
+```sql
+-- Criar nova tabela apenas com colunas úteis
+"""
+        good_columns = [col['Coluna'] for col in all_column_analysis if col['Acao'] == 'MANTER']
+        columns_select = ', '.join(good_columns)
+        markdown += f"SELECT {columns_select}\n"
+        markdown += f"INTO {schema}.{table_name}_cleaned\n"
+        markdown += f"FROM {schema}.{table_name}"
+        
+        if filters:
+            # Recriar WHERE clause
+            where_parts = []
+            for col_name, filter_config in filters.items():
+                op = filter_config['operator']
+                val = filter_config['value']
+                if isinstance(val, str):
+                    val = f"'{val}'"
+                elif isinstance(val, (list, tuple)):
+                    val = "(" + ", ".join([f"'{v}'" if isinstance(v, str) else str(v) for v in val]) + ")"
+                where_parts.append(f"{col_name} {op} {val}")
+            markdown += f"\nWHERE {' AND '.join(where_parts)}"
+        markdown += ";\n```\n\n"
+    
+    else:
+        markdown += """## Resultado da Análise
+
+✅ **NENHUMA COLUNA PRECISA SER EXCLUÍDA!**
+
+Todas as colunas atendem aos critérios de qualidade definidos.
+
+"""
+    
+    # Análise detalhada de todas as colunas
+    markdown += """## Análise Detalhada de Todas as Colunas
+
+| Coluna | Ação | Nulos (%) | Valores Únicos | Variância (%) | Zeros (%) | Vazias (%) | Tipo | Motivos |
+|--------|------|-----------|----------------|---------------|-----------|------------|------|---------|
+"""
+    
+    for col_data in all_column_analysis:
+        markdown += (f"| `{col_data['Coluna']}` | "
+                    f"{'🔴 EXCLUIR' if col_data['Acao'] == 'EXCLUIR' else '✅ MANTER'} | "
+                    f"{col_data['Nulos_Percent']}% | "
+                    f"{col_data['Valores_Unicos']} | "
+                    f"{col_data['Variancia_Percent']}% | "
+                    f"{col_data['Zeros_Percent']}% | "
+                    f"{col_data['Vazias_Percent']}% | "
+                    f"`{col_data['Tipo_Dados']}` | "
+                    f"{col_data['Motivos']} |\n")
+    
+    # Critérios utilizados
+    markdown += f"""
+## Critérios de Exclusão Utilizados
+
+### Critérios Aplicados:
+- **Muitos Nulos:** > 90% de valores nulos
+- **Valor Único:** Coluna possui apenas 1 valor único (sem variação)
+- **Muitos Zeros:** > 80% de valores zero (para colunas numéricas)
+- **Strings Vazias:** > 80% de strings vazias (para colunas de texto)
+
+### Colunas Mantidas:
+Colunas que **NÃO** atendem aos critérios de exclusão acima são consideradas úteis e mantidas na tabela.
+
+---
+*Relatório gerado automaticamente pelo Data Quality Analytics*
+"""
+    
+    return markdown
+
 def identify_columns_to_exclude(table_name, schema='dbo', filters=None, 
-                               null_threshold=90, low_variance_threshold=1, 
-                               zero_threshold=95):
+                               null_threshold=90, zero_threshold=80):
     """
     Identifica colunas candidatas à exclusão baseado em critérios específicos
     
@@ -161,15 +304,9 @@ def identify_columns_to_exclude(table_name, schema='dbo', filters=None,
     - schema: Schema da tabela  
     - filters: Dict com filtros {'coluna': {'operator': '>=', 'value': '2022-01-01'}}
     - null_threshold: % de nulos acima do qual a coluna é candidata à exclusão
-    - low_variance_threshold: % de valores únicos abaixo do qual é baixa variância
-    - zero_threshold: % de zeros acima do qual pode ser problemática
+    - zero_threshold: % de zeros/vazias acima do qual pode ser problemática
     
-    Exemplo de uso:
-    filters = {
-        'data_criacao': {'operator': '>=', 'value': '2022-01-01'},
-        'status': {'operator': 'IN', 'value': ['ATIVO', 'PENDENTE']},
-        'valor': {'operator': '>', 'value': 0}
-    }
+    CRITÉRIO MODIFICADO: Só exclui colunas com EXATAMENTE 1 valor único
     """
     
     print(f"\nIDENTIFICANDO COLUNAS PARA EXCLUSÃO")
@@ -185,7 +322,7 @@ def identify_columns_to_exclude(table_name, schema='dbo', filters=None,
     else:
         print("Sem filtros aplicados")
     
-    print(f"Critérios: Nulos >{null_threshold}%, Variância <{low_variance_threshold}%, Zeros >{zero_threshold}%")
+    print(f"Critérios: Nulos >{null_threshold}%, Valor Único (=1), Zeros >{zero_threshold}%")
     print("=" * 70)
     
     # Construir e executar query
@@ -235,15 +372,11 @@ def identify_columns_to_exclude(table_name, schema='dbo', filters=None,
         if null_percent >= null_threshold:
             reasons.append(f"MUITOS NULOS ({null_percent:.1f}%)")
         
-        # 2. ANÁLISE DE VARIÂNCIA (apenas se tiver dados)
+        # 2. ANÁLISE DE VARIÂNCIA (MODIFICADO: só exclui se tem EXATAMENTE 1 valor único)
         if len(col_data) > 0:
-            # Coluna com valor único
+            # Coluna com valor único (ÚNICO CRITÉRIO DE VARIÂNCIA)
             if unique_count == 1:
                 reasons.append(f"VALOR ÚNICO ({col_data.iloc[0]})")
-            
-            # Coluna com baixa variância
-            elif unique_percent < low_variance_threshold:
-                reasons.append(f"BAIXA VARIÂNCIA ({unique_count} valores únicos)")
         
         # 3. ANÁLISE DE ZEROS (para colunas numéricas)
         zero_percent = 0
@@ -292,7 +425,8 @@ def identify_columns_to_exclude(table_name, schema='dbo', filters=None,
             'Zeros_Percent': round(zero_percent, 1),
             'Vazias_Percent': round(empty_percent, 1),
             'Motivos': " | ".join(reasons) if reasons else "OK",
-            'Tipo_Dados': str(df[col].dtype)
+            'Tipo_Dados': str(df[col].dtype),
+            'Dataframe': df  # Para usar no relatório
         })
         
         print(f"{col:<25} {action:<8} - {reason_text}")
@@ -342,66 +476,24 @@ def identify_columns_to_exclude(table_name, schema='dbo', filters=None,
         print("\nNENHUMA COLUNA PRECISA SER EXCLUÍDA!")
         print("Todas as colunas atendem aos critérios de qualidade.")
     
-    # Salvar relatório
+    # Gerar relatório em Markdown
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     filename = f"data_quality_{table_name}_{timestamp}"
     
-    # Salvar Excel com análise completa
     try:
-        df_analysis = pd.DataFrame(all_column_analysis)
+        markdown_content = generate_markdown_report(
+            all_column_analysis, table_name, schema, filters,
+            columns_to_exclude, exclusion_reasons, query, params
+        )
         
-        with pd.ExcelWriter(f"{filename}.xlsx", engine='openpyxl') as writer:
-            # Aba principal com análise de todas as colunas
-            df_analysis.to_excel(writer, sheet_name='Analise_Completa', index=False)
-            
-            # Aba resumo
-            summary_data = {
-                'Métrica': [
-                    'Total de Colunas',
-                    'Colunas para Manter', 
-                    'Colunas para Excluir',
-                    'Percentual de Exclusão',
-                    'Critério Nulos (%)',
-                    'Critério Variância (%)',
-                    'Critério Zeros (%)',
-                    'Filtros Aplicados',
-                    'Data/Hora Análise'
-                ],
-                'Valor': [
-                    len(df.columns),
-                    len(df.columns) - len(columns_to_exclude),
-                    len(columns_to_exclude),
-                    f"{(len(columns_to_exclude)/len(df.columns))*100:.1f}%",
-                    f">{null_threshold}%",
-                    f"<{low_variance_threshold}%", 
-                    f">{zero_threshold}%",
-                    str(filters) if filters else "Nenhum",
-                    datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                ]
-            }
-            pd.DataFrame(summary_data).to_excel(writer, sheet_name='Resumo', index=False)
-            
-            # Aba apenas com colunas para excluir
-            if columns_to_exclude:
-                df_exclude = df_analysis[df_analysis['Acao'] == 'EXCLUIR'].copy()
-                df_exclude.to_excel(writer, sheet_name='Colunas_Excluir', index=False)
-            
-            # Aba apenas com colunas para manter
-            df_keep = df_analysis[df_analysis['Acao'] == 'MANTER'].copy()
-            df_keep.to_excel(writer, sheet_name='Colunas_Manter', index=False)
+        # Salvar arquivo markdown
+        with open(f"{filename}.md", 'w', encoding='utf-8') as f:
+            f.write(markdown_content)
         
-        print(f"\nRelatório Excel salvo: {filename}.xlsx")
+        print(f"\nRelatório Markdown salvo: {filename}.md")
         
     except Exception as e:
-        print(f"Erro ao salvar Excel: {e}")
-    
-    # Salvar CSV simples
-    try:
-        df_analysis = pd.DataFrame(all_column_analysis)
-        df_analysis.to_csv(f"{filename}.csv", index=False, encoding='utf-8')
-        print(f"Relatório CSV salvo: {filename}.csv")
-    except Exception as e:
-        print(f"Erro ao salvar CSV: {e}")
+        print(f"Erro ao salvar Markdown: {e}")
     
     # Retornar informações úteis
     return {
@@ -413,7 +505,8 @@ def identify_columns_to_exclude(table_name, schema='dbo', filters=None,
         'dataframe': df,
         'report_filename': filename,
         'query_executed': query,
-        'query_params': params
+        'query_params': params,
+        'markdown_content': markdown_content
     }
 
 def analyze_for_exclusion(table_name, schema='dbo', strict=False, filters=None):
@@ -425,18 +518,6 @@ def analyze_for_exclusion(table_name, schema='dbo', strict=False, filters=None):
         schema: Schema da tabela
         strict: True para critérios rigorosos, False para flexíveis
         filters: Dict com filtros {'coluna': {'operator': '>=', 'value': '2022-01-01'}}
-    
-    Exemplos de uso:
-    
-    # Filtro simples por data
-    filters = {'data_criacao': {'operator': '>=', 'value': '2022-01-01'}}
-    
-    # Múltiplos filtros
-    filters = {
-        'data_criacao': {'operator': '>=', 'value': '2022-01-01'},
-        'status': {'operator': 'IN', 'value': ['ATIVO', 'PENDENTE']},
-        'valor': {'operator': '>', 'value': 0}
-    }
     """
     
     if strict:
@@ -445,7 +526,6 @@ def analyze_for_exclusion(table_name, schema='dbo', strict=False, filters=None):
             table_name, schema,
             filters=filters,
             null_threshold=70,      # 70% de nulos
-            low_variance_threshold=2,   # <2% de valores únicos
             zero_threshold=90       # 90% de zeros
         )
     else:
@@ -454,7 +534,6 @@ def analyze_for_exclusion(table_name, schema='dbo', strict=False, filters=None):
             table_name, schema,
             filters=filters,
             null_threshold=90,      # 90% de nulos
-            low_variance_threshold=0.1,   # <0.1% de valores únicos  
             zero_threshold=80       # 80% de zeros
         )
 
@@ -470,12 +549,12 @@ if __name__ == "__main__":
         
         # Exemplo de uso com filtros
         filters = {
-            'data_criacao': {'operator': '>=', 'value': '2022-01-01'}
+            'DataCriacaoRegistro': {'operator': '>=', 'value': '2022-01-01'}
         }
         
         # Análise para exclusão
         result = analyze_for_exclusion(
-            table_name='Clientes', 
+            table_name='Facas', 
             schema='dbo', 
             strict=False,
             filters=filters
