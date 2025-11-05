@@ -20,7 +20,7 @@ class ReviewAgent:
         if not self.token:
             raise Exception("❌ FLOW_TOKEN não encontrado no .env")
 
-        self.base_url = "https://flow.ciandt.com/channels-service"
+        self.base_url = "https://flow..com/channels-service"
         self.headers = {
             "Authorization": f"Bearer " + self.token,
             "Content-Type": "application/json"

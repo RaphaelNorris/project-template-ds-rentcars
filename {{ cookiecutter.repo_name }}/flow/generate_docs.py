@@ -20,7 +20,7 @@ class DocumentationGenerator:
         if not self.token:
             raise Exception("❌ FLOW_TOKEN não encontrado no .env")
 
-        self.base_url = "https://flow.ciandt.com/channels-service"
+        self.base_url = "https://flow.com/channels-service"
         self.headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
@@ -165,16 +165,6 @@ def process_directory(source_dir: str, output_dir: str):
                     f.write(f"Data: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}\n\n")
                     f.write(result)
 
-                # with open(output_file_path, 'w', encoding='utf-8') as f:
-                #     f.write(f"""<p align="center">
-                # <img src="logo.png" alt="CI&T e Bradesco Seguros" width="250"/>
-                # </p>
-
-                # # Documentação de {file}
-                # Data: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}
-
-                # """)
-                #     f.write(result)
 
                 print(f"✅ Salvo em: {output_file_path}")
                 count += 1

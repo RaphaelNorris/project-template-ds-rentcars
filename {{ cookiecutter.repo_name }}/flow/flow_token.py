@@ -14,7 +14,7 @@ chrome_options = Options()
 chrome_options.add_argument("--start-maximized")
 
 driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
-driver.get(os.environ.get("FLOW_LOGIN_URL", "https://flow.ciandt.com/account/sign-in"))
+driver.get(os.environ.get("FLOW_LOGIN_URL", "https://.com/account/sign-in"))
 
 print("➡️ Faça login na janela aberta...")
 

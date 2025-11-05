@@ -12,7 +12,7 @@ class RefactorAgent:
         if not self.token:
             raise Exception("❌ FLOW_TOKEN não encontrado no .env")
 
-        self.base_url = "https://flow.ciandt.com/channels-service"
+        self.base_url = "https://flow..com/channels-service"
         self.headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
@@ -46,10 +46,10 @@ class RefactorAgent:
                         \"\"\"  
                         flow_credentials_retriever.py  
 
-                        Script de autenticação automática no Flow CI&T.
+                        Script de autenticação automática no Flow .
 
                         Este script abre um navegador Chrome para que o usuário faça login no  
-                        sistema Flow CI&T e captura os cookies de autenticação necessários.  
+                        sistema Flow  e captura os cookies de autenticação necessários.  
                         Após capturar os cookies, o script salva as credenciais no arquivo .env.  
                         \"\"\"  
 
