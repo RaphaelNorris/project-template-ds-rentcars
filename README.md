@@ -1,8 +1,7 @@
-# Cookiecutter - Template de Projeto de Data Science CI&T
+# Cookiecutter - Template de Projeto de Data Science Rentcars
 
 Este repositório contém um template completo e configurável para projetos de Data Science com boas práticas de organização, versionamento, estrutura de dados e pipelines.
 
-Foi desenvolvido pela célula de dados do Bradesco Seguros.
 
 ---
 
@@ -77,9 +76,6 @@ pip install -r requirements.txt
 python ./flow/flow_token.py
 ```
 
-> **Importante**:
-> Esse script abrirá uma janela de login CI\&T.
-> **Não clique em "Continuar como \[Seu Nome]"**.
 > Apenas aguarde a confirmação da autenticação — as credenciais serão salvas automaticamente.
 
 ### 3. Confirme a criação do `.env`
