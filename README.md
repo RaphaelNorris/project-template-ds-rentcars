@@ -74,10 +74,6 @@ pip install -r requirements.txt
 
 ### 3. Confirme a criação do `.env`
 
-Após a execução correta, um arquivo `.env` será criado com as variáveis:
-
-* `FLOW_TOKEN`
-* `FLOW_TENANT`
 
 ---
 
@@ -88,7 +84,6 @@ A partir daqui, você pode:
 * Criar notebooks em `notebooks/`
 * Desenvolver pipelines modulares em `src/pipelines/`
 * Armazenar dados em camadas no `data/`
-* Usar o `flow/review_agent.py` ou `flow/refactor_agent.py` com suas credenciais
 
 ---
 
@@ -96,7 +91,6 @@ A partir daqui, você pode:
 
 * Python 3.10, 3.11 ou 3.12
 * Git + cookiecutter
-* Conta CI\&T com acesso ao Flow
 
 ---
 
