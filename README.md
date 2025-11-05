@@ -24,7 +24,7 @@ pip install cookiecutter
 ### 3. Gere seu projeto
 
 ```bash
-cookiecutter https://github.com/RaphaelNorris/project_ds_template_ciandt.git
+cookiecutter https://github.com/RaphaelNorris/project-template-ds-rentcars.git
 ```
 
 Você será guiado com prompts no terminal.
@@ -49,7 +49,6 @@ brad-seguros/
 │   ├── 02 - silver/
 │   ├── 03 - ml/
 │   └── 04 - gold/
-├── flow/
 ├── notebooks/
 ├── src/
 ├── tests/
