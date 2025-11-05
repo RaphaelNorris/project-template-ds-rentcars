@@ -59,8 +59,6 @@ brad-seguros/
 
 ---
 
-## Autenticação com Flow Agents
-
 Após a geração do projeto, siga os passos abaixo para configurar o token de acesso:
 
 ### 1. Instale as dependências
@@ -71,9 +69,6 @@ pip install -r requirements.txt
 
 ### 2. Execute o script de autenticação
 
-```bash
-python ./flow/flow_token.py
-```
 
 > Apenas aguarde a confirmação da autenticação — as credenciais serão salvas automaticamente.
 
