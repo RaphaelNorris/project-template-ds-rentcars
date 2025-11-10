@@ -1,0 +1,113 @@
+# AWS Configuration for MLOps Pipeline
+
+aws:
+  region: us-east-1
+  profile: default
+
+s3:
+  # Data Lake buckets
+  raw_bucket: ${oc.env:S3_RAW_BUCKET}
+  processed_bucket: ${oc.env:S3_PROCESSED_BUCKET}
+  ml_artifacts_bucket: ${oc.env:S3_ML_ARTIFACTS_BUCKET}
+
+  # Data paths within buckets
+  paths:
+    bronze: raw/bronze/
+    silver: processed/silver/
+    gold: processed/gold/
+    ml_features: ml/features/
+    ml_models: ml/models/
+    ml_predictions: ml/predictions/
+    ml_evaluations: ml/evaluations/
+
+athena:
+  database: ${oc.env:ATHENA_DATABASE, ml_database}
+  workgroup: ${oc.env:ATHENA_WORKGROUP, primary}
+  output_location: ${oc.env:ATHENA_OUTPUT_LOCATION}
+
+  # Iceberg catalog configuration
+  catalog:
+    type: glue
+    warehouse: ${s3.processed_bucket}/iceberg-warehouse/
+
+iceberg:
+  enabled: true
+  tables:
+    features: feature_store
+    training_data: training_datasets
+    predictions: model_predictions
+
+  # Table properties
+  properties:
+    format-version: 2
+    write.parquet.compression-codec: snappy
+    write.metadata.compression-codec: gzip
+
+ec2:
+  # Training instance configuration
+  training:
+    instance_type: ${oc.env:EC2_TRAINING_INSTANCE_TYPE, ml.m5.2xlarge}
+    ami_id: ${oc.env:EC2_AMI_ID}
+    key_name: ${oc.env:EC2_KEY_NAME}
+    security_group: ${oc.env:EC2_SECURITY_GROUP}
+    iam_role: ${oc.env:EC2_IAM_ROLE}
+
+  # Inference instance configuration
+  inference:
+    instance_type: ${oc.env:EC2_INFERENCE_INSTANCE_TYPE, ml.t3.medium}
+    ami_id: ${oc.env:EC2_AMI_ID}
+    key_name: ${oc.env:EC2_KEY_NAME}
+    security_group: ${oc.env:EC2_SECURITY_GROUP}
+    iam_role: ${oc.env:EC2_IAM_ROLE}
+
+ecr:
+  # Container registry configuration
+  registry_url: ${oc.env:ECR_REGISTRY_URL}
+  repositories:
+    training: ml-training
+    inference: ml-inference
+    feature_pipeline: ml-feature-pipeline
+    monitoring: ml-monitoring
+
+mlflow:
+  # MLFlow tracking server
+  tracking_uri: ${oc.env:MLFLOW_TRACKING_URI}
+  artifact_location: s3://${s3.ml_artifacts_bucket}/mlflow/
+
+  # Experiment configuration
+  experiment_name: ${oc.env:MLFLOW_EXPERIMENT_NAME, default}
+
+  # Model registry
+  registry:
+    backend: s3
+    bucket: ${s3.ml_artifacts_bucket}
+    prefix: mlflow/registry/
+
+feature_store:
+  # Feature store configuration
+  backend: feast
+  registry_path: s3://${s3.processed_bucket}/feature_store/registry.db
+  online_store:
+    type: dynamodb
+    region: ${aws.region}
+  offline_store:
+    type: athena
+    data_source: ${s3.processed_bucket}
+    database: ${athena.database}
+    workgroup: ${athena.workgroup}
+
+monitoring:
+  # Model monitoring configuration
+  enabled: true
+  metrics_backend: prometheus
+  drift_detection:
+    enabled: true
+    threshold: 0.05
+    window_size: 1000
+
+  # Alerting
+  alerts:
+    enabled: true
+    channels:
+      - email
+      - slack

@@ -1,0 +1,37 @@
+# Training Pipeline Dockerfile
+FROM python:3.11-slim
+
+LABEL maintainer="{{ cookiecutter.author_name }}"
+LABEL description="ML Training Pipeline for MLOps"
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    git \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements
+COPY requirements.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY src/ ./src/
+COPY config/ ./config/
+COPY data/ ./data/
+
+# Set Python path
+ENV PYTHONPATH=/app
+
+# Create directories for outputs
+RUN mkdir -p /app/data/ml/models \
+    /app/data/ml/features \
+    /app/data/ml/training_sets \
+    /app/data/ml/evaluations
+
+# Default command
+CMD ["python", "-m", "src.pipelines.DS.training_pipeline"]

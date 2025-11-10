@@ -1,0 +1,37 @@
+# MLFlow Tracking Server Dockerfile
+FROM python:3.11-slim
+
+LABEL maintainer="{{ cookiecutter.author_name }}"
+LABEL description="MLFlow Tracking Server for MLOps Pipeline"
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    postgresql-client \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir \
+    mlflow>=2.9.0 \
+    boto3>=1.28.0 \
+    psycopg2-binary>=2.9.0 \
+    pymysql>=1.1.0
+
+# Create directories
+RUN mkdir -p /mlflow/artifacts
+
+# Expose MLFlow port
+EXPOSE 5000
+
+# Set environment variables
+ENV MLFLOW_BACKEND_STORE_URI=sqlite:///mlflow/mlflow.db
+ENV MLFLOW_DEFAULT_ARTIFACT_ROOT=/mlflow/artifacts
+
+# Run MLFlow server
+CMD mlflow server \
+    --backend-store-uri ${MLFLOW_BACKEND_STORE_URI} \
+    --default-artifact-root ${MLFLOW_DEFAULT_ARTIFACT_ROOT} \
+    --host 0.0.0.0 \
+    --port 5000
